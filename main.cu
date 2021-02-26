@@ -10,7 +10,7 @@
 
 
 // This function only does matrix multiplication
-__global__ void matrixMultiplywithBiasShared(float* A, float* B, float* C,
+__global__ void matrixMultiplyShared(float* A, float* B, float* C,
     int numARows, int numAColumns,
     int numBRows, int numBColumns,
     int numCRows, int numCColumns)
