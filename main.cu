@@ -6,15 +6,11 @@
 #include <driver_types.h>
 #include "device_launch_parameters.h"
 
-#define Tile_size 2
-
-//Function To handle any errors occurred in the function calls
+#define Tile_size 16
 
 
-// Compute C = A * B
-//*************************************************************
-//Kernel for shared memory/ Tiled execution
-__global__ void matrixMultiplyShared(float* A, float* B, float* C,
+// This function only does matrix multiplication
+__global__ void matrixMultiplywithBiasShared(float* A, float* B, float* C,
     int numARows, int numAColumns,
     int numBRows, int numBColumns,
     int numCRows, int numCColumns)
@@ -58,6 +54,55 @@ __global__ void matrixMultiplyShared(float* A, float* B, float* C,
         C[Row * numCColumns + Col] = Cvalue;
     }
 }
+// Compute C = A * B
+//*************************************************************
+//Kernel for shared memory/ Tiled execution
+
+//This function does matrix multiplication and adds the bias
+__global__ void matrixMultiplywithBiasShared(float* A, float* B, float* C, float* bias,
+    int numARows, int numAColumns,
+    int numBRows, int numBColumns,
+    int numCRows, int numCColumns)
+{
+    __shared__ float sA[Tile_size][Tile_size];   // Tile size to store elements in shared memory
+    __shared__ float sB[Tile_size][Tile_size];
+
+    int Row = blockDim.y * blockIdx.y + threadIdx.y; //To generate ids of threads.
+    int Col = blockDim.x * blockIdx.x + threadIdx.x;
+    float Cvalue = 0.0;
+    sA[threadIdx.y][threadIdx.x] = 0.0;
+    sB[threadIdx.y][threadIdx.x] = 0.0;
+
+    for (int k = 0; k < (((numAColumns - 1) / Tile_size) + 1); k++)
+    {
+        if ((Row < numARows) && (threadIdx.x + (k * Tile_size)) < numAColumns)//Copy Data to Tile from Matrix (Global Memory to Shared Memory)
+        {
+            sA[threadIdx.y][threadIdx.x] = A[(Row * numAColumns) + threadIdx.x + (k * Tile_size)];
+        }
+        else
+        {
+            sA[threadIdx.y][threadIdx.x] = 0.0;
+        }
+        if (Col < numBColumns && (threadIdx.y + k * Tile_size) < numBRows)//Copy Data to Tile from Matrix (Global Memory to Shared Memory)
+        {
+            sB[threadIdx.y][threadIdx.x] = B[(threadIdx.y + k * Tile_size) * numBColumns + Col];
+        }
+        else
+        {
+            sB[threadIdx.y][threadIdx.x] = 0.0;
+        }
+        __syncthreads();
+
+        for (int j = 0; j < Tile_size; ++j)//Multiplying Elements present in tile
+        {
+            Cvalue += sA[threadIdx.y][j] * sB[j][threadIdx.x];
+        }
+    }
+    if (Row < numCRows && Col < numCColumns)//Saving Final result into Matrix C
+    {
+        C[Row * numCColumns + Col] = Cvalue + bias[Row * numCColumns + Col];
+    }
+}
 
 __global__ void reluActivationForward(float* Z, float* A,
     int Z_x_dim, int Z_y_dim) {
@@ -97,11 +142,33 @@ void matMultiplyOnHost(float* A, float* B, float* C, int numARows,
                 C[i * numCColumns + j] += A[i * numAColumns + k] * B[k * numBColumns + j];
             }
         }
+
+    }
+    return;
+}
+
+void matMultiplywithBiasOnHost(float* A, float* B, float* C, float* bias, int numARows,
+    int numAColumns, int numBRows, int numBColumns,
+    int numCRows, int numCColumns)
+{
+    for (int i = 0; i < numARows; i++)
+    {
+        for (int j = 0; j < numBColumns; j++)
+        {
+            C[i * numCColumns + j] = 0.0;
+            for (int k = 0; k < numBRows; k++)
+            {
+                C[i * numCColumns + j] += A[i * numAColumns + k] * B[k * numBColumns + j];
+            }
+        C[i * numCColumns + j] += bias[i * numCColumns + j];
+        }
+        
+
     }
     return;
 }
 //*************************************************************
-int input_rows = 1;
+int input_rows = 8192;
 int input_cols = 784;
 int layer1_rows = 784;
 int layer1_cols = 128;
@@ -133,6 +200,9 @@ int main(int argc, char** argv) {
 
     float* device_layer2w;
     float* device_layer2b;
+
+    float* device_layer2out_w;
+    float* device_layer2out_b;
 
     // Please adjust rows and columns according to you need.
 
@@ -189,6 +259,8 @@ int main(int argc, char** argv) {
     cudaMalloc((void**)&device_layer1b, sizeof(float) * input_rows * layer1_cols);
     cudaMalloc((void**)&device_layer1out_w, sizeof(float) * input_rows * layer1_cols);
     cudaMalloc((void**)&device_layer1out_b, sizeof(float) * input_rows * layer1_cols);
+    cudaMalloc((void**)&device_layer2out_w, sizeof(float) * input_rows * layer2_cols);
+    cudaMalloc((void**)&device_layer2out_b, sizeof(float) * input_rows * layer2_cols);
 
     //Layer 2
     cudaMalloc((void**)&device_layer2w, sizeof(float) * layer2_rows * layer2_cols);
@@ -204,41 +276,81 @@ int main(int argc, char** argv) {
 
     // Initialize the grid and block dimensions
 
-    dim3 dimGrid((layer1_cols / Tile_size) + 1, (input_rows / Tile_size) + 1, 1);//Number of Blocks required
-    dim3 dimBlock(Tile_size, Tile_size, 1);//Number of threads in each block
+   
 
-    cudaEvent_t start, stop;
-    float time_w, time_b;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
+    cudaEvent_t start_main, stop_main, start_layer1, stop_layer1, start_layer2, stop_layer2, start_host, stop_host;
+    float time_main, time_layer1, time_layer2, time_host;
+    cudaEventCreate(&start_main);
+    cudaEventCreate(&stop_main);
+    cudaEventCreate(&start_layer1);
+    cudaEventCreate(&stop_layer1);
+    cudaEventCreate(&start_layer2);
+    cudaEventCreate(&stop_layer2);
+    cudaEventCreate(&start_host);
+    cudaEventCreate(&stop_host);
 
-
+    dim3 dimGrid1((layer1_cols / Tile_size) + 1, (input_rows / Tile_size) + 1, 1);//Number of Blocks required
+    dim3 dimBlock1(Tile_size, Tile_size, 1);//Number of threads in each block
     //@@ Launch the GPU Kernel here
-    cudaEventRecord(start, 0);      // start time measurement
-    matrixMultiplyShared << <dimGrid, dimBlock >> > (device_input, device_layer1w, device_layer1out_w, input_rows, input_cols, layer1_rows, layer1_cols, input_rows, layer1_cols);
+    cudaEventRecord(start_main, 0);      // start time measurement
+    // Does matrix multiply and adds the bias
+    matrixMultiplywithBiasShared << <dimGrid1, dimBlock1 >> > (device_input, device_layer1w, device_layer1out_w, device_layer1b, input_rows, input_cols, layer1_rows, layer1_cols, input_rows, layer1_cols);
 
 
     cudaDeviceSynchronize();//To synchronize the device
-    cudaEventRecord(stop, 0);       // stop time measurement
-    cudaEventSynchronize(stop);     // sync results
-    cudaEventElapsedTime(&time_w, start, stop);
-    printf("Elapsed time : %f ms\n", time_w);
+    cudaEventRecord(stop_layer1, 0);       // stop time measurement
+    cudaEventSynchronize(stop_layer1);     // sync results
+    cudaEventElapsedTime(&time_main, start_main, stop_layer1);
+    printf("Elapsed time for layer1 : %f ms\n", time_main);
 
-    cudaError_t err1 = cudaPeekAtLastError();//To capture last error in function call
+    int n_threads = 16;
+    dim3 dimGrid1b((input_rows * layer1_cols) / n_threads, 1, 1);//Number of Blocks required
+    dim3 dimBlock1b(n_threads, 1, 1);//Number of threads in each block
 
-  
+    reluActivationForward << < dimGrid1b, dimBlock1b >> > (device_layer1out_w, device_layer1out_b, input_rows, layer1_cols);
+    cudaDeviceSynchronize();
+
+    dim3 dimGrid2((layer2_cols / Tile_size) + 1, (input_rows / Tile_size) + 1, 1);//Number of Blocks required
+    dim3 dimBlock2(Tile_size, Tile_size, 1);//Number of threads in each block
+
+    cudaEventRecord(start_layer2, 0);
+    matrixMultiplywithBiasShared << <dimGrid1, dimBlock1 >> > (device_layer1out_b, device_layer2w, device_layer2out_w, device_layer2b, input_rows, layer1_cols, layer2_rows, layer2_cols, input_rows, output_cols);
+    cudaDeviceSynchronize();
+    cudaEventRecord(stop_layer2, 0);       // stop time measurement
+    cudaEventSynchronize(stop_layer2);     // sync results
+    cudaEventElapsedTime(&time_layer2, start_layer2, stop_layer2);
+    printf("Elapsed time for layer2 : %f ms\n", time_layer2);
+
+    n_threads = 16;
+    dim3 dimGrid2b((input_rows * layer2_cols) / n_threads, 1, 1);//Number of Blocks required
+    dim3 dimBlock2b(n_threads, 1, 1);//Number of threads in each block
+
+    reluActivationForward << < dimGrid1b, dimBlock1b >> > (device_layer2out_w, device_layer2out_b, input_rows, output_cols);
+    cudaDeviceSynchronize();
+    cudaEventRecord(stop_main, 0);       // stop time measurement
+    cudaEventSynchronize(stop_main);     // sync results
+    cudaEventElapsedTime(&time_main, start_main, stop_main);
+    printf("Elapsed time for all layers : %f ms\n", time_main);
+    //cudaError_t err1 = cudaPeekAtLastError();//To capture last error in function call
 
     // Copy the results in GPU memory back to the CPU
-    cudaMemcpy(host_layer1out, device_layer1out_w, sizeof(float) * input_rows * layer1_cols, cudaMemcpyDeviceToHost);
+    cudaMemcpy(host_layer1out, device_layer2out_b, sizeof(float) * input_rows * output_cols, cudaMemcpyDeviceToHost);
 
     printf("\nMatrix C From Device\n");
-    //Print_Mat(numCRows, numCColumns, hostC);//Function Call
+    //Print_Mat(input_rows, layer1_cols, host_layer1out);//Function Call
 
+    cudaEventRecord(start_host, 0);
     matMultiplyOnHost(host_input, host_layer1w, hostComputedC, input_rows, input_cols, layer1_rows, layer1_cols, input_rows, layer1_cols);
+
+    cudaEventRecord(stop_host, 0);       // stop time measurement
+    cudaEventSynchronize(stop_host);     // sync results
+    cudaEventElapsedTime(&time_host, start_host, stop_host);
+    printf("Elapsed time for host on layer 1: %f ms\n", time_host);
 
     printf("\nMatrix C From Host\n");
     //Print_Mat(numCRows, numCColumns, hostComputedC);//Function Call
 
+    /*
     for (int i = 0; i < input_rows * layer1_cols; i++)//Compare both the result matrices 1. MatrixMultiplyonHost 2. MatrixMultiplyonDevice
     {
         if (hostComputedC[i] != host_layer1out[i])
@@ -247,6 +359,7 @@ int main(int argc, char** argv) {
             break;
         }
     }
+    */
 
     printf("\n Number of Blocks Created:%d \n", ((layer1_cols / Tile_size) + 1) * ((layer1_cols / Tile_size) + 1));
     printf("\n Number of Threads Per Block: %d \n", (Tile_size * Tile_size));
