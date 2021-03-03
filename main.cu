@@ -127,46 +127,41 @@ void Print_Mat(int Row, int Col, float* Mat)//Function To print the Matrix
     }
 }//Function close
 //*************************************************************
-//Normal CPU Matrix Multiplication
-void matMultiplyOnHost(float* A, float* B, float* C, int numARows,
-    int numAColumns, int numBRows, int numBColumns,
-    int numCRows, int numCColumns)
+// M - input 1 columns        N - input 1 columns/input 2 rows        K - input 2 columns
+void matMultiplyOnHost(float* A, float* B, float* C, int M, int N, int K)
 {
-    for (int i = 0; i < numARows; i++)
+    for (int i = 0; i < M; i++)
     {
-        for (int j = 0; j < numBColumns; j++)
+        for (int j = 0; j < K; j++)
         {
-            C[i * numCColumns + j] = 0.0;
-            for (int k = 0; k < numBRows; k++)
+            C[i * K + j] = 0.0;
+            for (int x = 0; x < N; x++)
             {
-                C[i * numCColumns + j] += A[i * numAColumns + k] * B[k * numBColumns + j];
+                C[i * K + j] += A[i * N + x] * B[x * K + j];
             }
         }
-
     }
     return;
 }
 
-void matMultiplywithBiasOnHost(float* A, float* B, float* C, float* bias, int numARows,
-    int numAColumns, int numBRows, int numBColumns,
-    int numCRows, int numCColumns)
+//CPU Matrix Multiplication with Bias added
+void matMultiplyOnHostBias(float* A, float* B, float* C, float* bias, int M, int N, int K)
 {
-    for (int i = 0; i < numARows; i++)
+    for (int i = 0; i < M; i++)
     {
-        for (int j = 0; j < numBColumns; j++)
+        for (int j = 0; j < K; j++)
         {
-            C[i * numCColumns + j] = 0.0;
-            for (int k = 0; k < numBRows; k++)
+            C[i * K + j] = 0.0;
+            for (int x = 0; x < N; x++)
             {
-                C[i * numCColumns + j] += A[i * numAColumns + k] * B[k * numBColumns + j];
+                C[i * K + j] += A[i * N + x] * B[x * K + j];
             }
-        C[i * numCColumns + j] += bias[i * numCColumns + j];
+            C[i * K + j] += bias[i * K + j];
         }
-        
-
     }
     return;
 }
+
 //*************************************************************
 int input_rows = 8192;
 int input_cols = 784;
@@ -340,7 +335,7 @@ int main(int argc, char** argv) {
     //Print_Mat(input_rows, layer1_cols, host_layer1out);//Function Call
 
     cudaEventRecord(start_host, 0);
-    matMultiplyOnHost(host_input, host_layer1w, hostComputedC, input_rows, input_cols, layer1_rows, layer1_cols, input_rows, layer1_cols);
+    matMultiplyOnHost(host_input, host_layer1w, hostComputedC, input_rows, input_cols, layer1_cols);
 
     cudaEventRecord(stop_host, 0);       // stop time measurement
     cudaEventSynchronize(stop_host);     // sync results
