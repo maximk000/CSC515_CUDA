@@ -8,6 +8,23 @@
 
 #define Tile_size 16
 
+// Naive Matrix Mulitplication with only register optimization (for comparison)
+__global__ void gpu_matrix_mult(float* a, float* b, float* c, int m, int n, int k)
+{
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    float temp = 0.0;
+    if (col < k && row < m)
+    {
+        for (int i = 0; i < n; i++)
+        {
+            temp += a[row * n + i] * b[i * k + col];
+            printf("Pos: %d | Thread.y: %d | row: %d | Thread.x: %d | col: %d | %f * %f\n", row * k + col, threadIdx.y, row, threadIdx.x, col, a[row * n + i], b[i * k + col]);
+        }
+        c[row * k + col] = temp;
+    }
+}
+
 
 // This function only does matrix multiplication
 __global__ void matrixMultiplyShared(float* A, float* B, float* C,
@@ -160,6 +177,14 @@ void matMultiplyOnHostBias(float* A, float* B, float* C, float* bias, int M, int
         }
     }
     return;
+}
+
+// Relu CPU function
+void reluActivationForwardOnHost(float* Z, float* A, int Z_x_dim, int Z_y_dim) {
+
+    for(int index = 0; index < Z_x_dim * Z_y_dim; index++) {
+        A[index] = fmaxf(Z[index], 0);
+    }
 }
 
 //*************************************************************
