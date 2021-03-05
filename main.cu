@@ -19,7 +19,7 @@ __global__ void gpu_matrix_mult(float* a, float* b, float* c, int m, int n, int 
         for (int i = 0; i < n; i++)
         {
             temp += a[row * n + i] * b[i * k + col];
-            printf("Pos: %d | Thread.y: %d | row: %d | Thread.x: %d | col: %d | %f * %f\n", row * k + col, threadIdx.y, row, threadIdx.x, col, a[row * n + i], b[i * k + col]);
+            //printf("Pos: %d | Thread.y: %d | row: %d | Thread.x: %d | col: %d | %f * %f\n", row * k + col, threadIdx.y, row, threadIdx.x, col, a[row * n + i], b[i * k + col]);
         }
         c[row * k + col] = temp;
     }
@@ -188,7 +188,7 @@ void reluActivationForwardOnHost(float* Z, float* A, int Z_x_dim, int Z_y_dim) {
 }
 
 //*************************************************************
-int input_rows = 8192;
+int input_rows = 16384;
 int input_cols = 784;
 int layer1_rows = 784;
 int layer1_cols = 128;
@@ -318,10 +318,7 @@ int main(int argc, char** argv) {
 
 
     cudaDeviceSynchronize();//To synchronize the device
-    cudaEventRecord(stop_layer1, 0);       // stop time measurement
-    cudaEventSynchronize(stop_layer1);     // sync results
-    cudaEventElapsedTime(&time_main, start_main, stop_layer1);
-    printf("Elapsed time for layer1 : %f ms\n", time_main);
+    
 
     int n_threads = 16;
     dim3 dimGrid1b((input_rows * layer1_cols) / n_threads, 1, 1);//Number of Blocks required
@@ -329,17 +326,17 @@ int main(int argc, char** argv) {
 
     reluActivationForward << < dimGrid1b, dimBlock1b >> > (device_layer1out_w, device_layer1out_b, input_rows, layer1_cols);
     cudaDeviceSynchronize();
-
+    cudaEventRecord(stop_layer1, 0);       // stop time measurement
+    cudaEventSynchronize(stop_layer1);     // sync results
+    cudaEventElapsedTime(&time_main, start_main, stop_layer1);
+    printf("Elapsed time for layer1 : %f ms\n", time_main);
     dim3 dimGrid2((layer2_cols / Tile_size) + 1, (input_rows / Tile_size) + 1, 1);//Number of Blocks required
     dim3 dimBlock2(Tile_size, Tile_size, 1);//Number of threads in each block
 
     cudaEventRecord(start_layer2, 0);
     matrixMultiplywithBiasShared << <dimGrid1, dimBlock1 >> > (device_layer1out_b, device_layer2w, device_layer2out_w, device_layer2b, input_rows, layer1_cols, layer2_rows, layer2_cols, input_rows, output_cols);
     cudaDeviceSynchronize();
-    cudaEventRecord(stop_layer2, 0);       // stop time measurement
-    cudaEventSynchronize(stop_layer2);     // sync results
-    cudaEventElapsedTime(&time_layer2, start_layer2, stop_layer2);
-    printf("Elapsed time for layer2 : %f ms\n", time_layer2);
+    
 
     n_threads = 16;
     dim3 dimGrid2b((input_rows * layer2_cols) / n_threads, 1, 1);//Number of Blocks required
@@ -347,6 +344,11 @@ int main(int argc, char** argv) {
 
     reluActivationForward << < dimGrid1b, dimBlock1b >> > (device_layer2out_w, device_layer2out_b, input_rows, output_cols);
     cudaDeviceSynchronize();
+    cudaEventRecord(stop_layer2, 0);       // stop time measurement
+    cudaEventSynchronize(stop_layer2);     // sync results
+    cudaEventElapsedTime(&time_layer2, start_layer2, stop_layer2);
+    printf("Elapsed time for layer2 : %f ms\n", time_layer2);
+
     cudaEventRecord(stop_main, 0);       // stop time measurement
     cudaEventSynchronize(stop_main);     // sync results
     cudaEventElapsedTime(&time_main, start_main, stop_main);
@@ -354,13 +356,13 @@ int main(int argc, char** argv) {
     //cudaError_t err1 = cudaPeekAtLastError();//To capture last error in function call
 
     // Copy the results in GPU memory back to the CPU
-    cudaMemcpy(host_layer1out, device_layer2out_b, sizeof(float) * input_rows * output_cols, cudaMemcpyDeviceToHost);
+    cudaMemcpy(host_layer1out, device_layer1out_b, sizeof(float) * input_rows * layer1_cols, cudaMemcpyDeviceToHost);
 
     printf("\nMatrix C From Device\n");
     //Print_Mat(input_rows, layer1_cols, host_layer1out);//Function Call
 
     cudaEventRecord(start_host, 0);
-    matMultiplyOnHost(host_input, host_layer1w, hostComputedC, input_rows, input_cols, layer1_cols);
+    matMultiplyOnHostBias(host_input, host_layer1w, hostComputedC, host_layer1b, input_rows, input_cols, layer1_cols);
 
     cudaEventRecord(stop_host, 0);       // stop time measurement
     cudaEventSynchronize(stop_host);     // sync results
@@ -370,7 +372,7 @@ int main(int argc, char** argv) {
     printf("\nMatrix C From Host\n");
     //Print_Mat(numCRows, numCColumns, hostComputedC);//Function Call
 
-    /*
+    
     for (int i = 0; i < input_rows * layer1_cols; i++)//Compare both the result matrices 1. MatrixMultiplyonHost 2. MatrixMultiplyonDevice
     {
         if (hostComputedC[i] != host_layer1out[i])
@@ -379,7 +381,7 @@ int main(int argc, char** argv) {
             break;
         }
     }
-    */
+    
 
     printf("\n Number of Blocks Created:%d \n", ((layer1_cols / Tile_size) + 1) * ((layer1_cols / Tile_size) + 1));
     printf("\n Number of Threads Per Block: %d \n", (Tile_size * Tile_size));
